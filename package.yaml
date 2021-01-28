@@ -1,0 +1,32 @@
+name: gameoflife
+version: 0.1.0.0
+license: MIT
+license-file: LICENSE
+author: Thomas Koster
+copyright: 2021 Thomas Koster
+description: Conway's game of life.
+
+dependencies:
+- base >= 4.7 && < 5
+
+default-extensions:
+- BangPatterns
+- DuplicateRecordFields
+- MultiWayIf 
+- NamedFieldPuns 
+- OverloadedStrings 
+- RecordWildCards
+
+executables:
+  gameoflife:
+    main: Main.hs
+    source-dirs: src
+    ghc-options:
+    - -Wall
+    - -O2
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N1
+    dependencies:
+    - sdl2
+    - vector
