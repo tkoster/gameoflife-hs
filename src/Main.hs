@@ -220,8 +220,15 @@ keymap scancode state@GameState {..} =
     SDL.Scancode3 -> return state { selectedPatternNumber = 2 }
     SDL.ScancodeP -> return state { pause = not pause }
     SDL.ScancodeR -> return state { selectedRotationNumber = succ selectedRotationNumber `mod` 4 }
+    SDL.ScancodeBackspace -> clearGeneration gen1 >> return state
     SDL.ScancodePeriod -> return state { step = True }
     _ -> return state
+
+clearGeneration :: Cells -> IO ()
+clearGeneration gen@Cells { width, height } =
+  forM_ [0 .. height - 1] $ \y ->
+    forM_ [0 .. width - 1] $ \x ->
+      writeCell gen x y 0
 
 stepGeneration :: Int32 -> Cells -> Cells -> IO ()
 stepGeneration frame gen0 gen1@Cells { width, height } =
