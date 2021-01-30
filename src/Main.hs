@@ -86,6 +86,7 @@ isMouseDownEvent _ = False
 data GameState = GameState {
   frame   :: Int32,
   pause   :: Bool,
+  step    :: Bool,
   width   :: Int32,
   height  :: Int32,
   gen0    :: Cells,
@@ -159,6 +160,7 @@ gameInit :: Int32 -> Int32 -> IO GameState
 gameInit windowWidth windowHeight = do
   let frame = 1
       pause = False
+      step = False
       width = windowWidth `div` fromIntegral cellSize
       height = windowHeight `div` fromIntegral cellSize
       numCells = fromIntegral (width * height)
@@ -182,11 +184,12 @@ gameUpdate renderer events state = do
       mouseWasPressed = any isMouseDownEvent events
       selectedPattern = patterns !! selectedPatternNumber
       selectedRotation = rotations !! selectedRotationNumber
+      advance = step || not pause
 
   when (mouseIsPressed || mouseWasPressed) $
     writeCells gen1 mouseCellX mouseCellY selectedRotation selectedPattern frame
 
-  unless pause $
+  when advance $
     stepGeneration frame gen1 gen0
 
   drawGeneration renderer frame gen1
@@ -195,8 +198,9 @@ gameUpdate renderer events state = do
 
   return state' {
       frame = frame + 1,
-      gen0 = if pause then gen0 else gen1,
-      gen1 = if pause then gen1 else gen0
+      step = False,
+      gen0 = if advance then gen1 else gen0,
+      gen1 = if advance then gen0 else gen1
     }
 
 processInput :: SDL.Event -> GameState -> IO GameState
@@ -216,6 +220,7 @@ keymap scancode state@GameState {..} =
     SDL.Scancode3 -> return state { selectedPatternNumber = 2 }
     SDL.ScancodeP -> return state { pause = not pause }
     SDL.ScancodeR -> return state { selectedRotationNumber = succ selectedRotationNumber `mod` 4 }
+    SDL.ScancodePeriod -> return state { step = True }
     _ -> return state
 
 stepGeneration :: Int32 -> Cells -> Cells -> IO ()
