@@ -76,9 +76,6 @@ isKeyDownEvent predicate event =
 isQuitEvent :: SDL.Event -> Bool
 isQuitEvent = isKeyDownEvent $ \scancode -> scancode == SDL.ScancodeEscape || scancode == SDL.ScancodeQ
 
-isPauseEvent :: SDL.Event -> Bool
-isPauseEvent = isKeyDownEvent (== SDL.ScancodeP)
-
 isMouseDownEvent :: SDL.Event -> Bool
 isMouseDownEvent event
   | SDL.MouseButtonEvent buttonEvent <- SDL.eventPayload event,
@@ -92,7 +89,9 @@ data GameState = GameState {
   width   :: Int32,
   height  :: Int32,
   gen0    :: Cells,
-  gen1    :: Cells
+  gen1    :: Cells,
+  selectedPatternNumber :: Int,
+  selectedRotationNumber :: Int
 }
 
 data Cells = Cells {
@@ -107,12 +106,54 @@ readCell Cells { width, values } x y = Vector.read values (fromIntegral $ y * wi
 writeCell :: Cells -> Int32 -> Int32 -> Int32 -> IO ()
 writeCell Cells { width, values } x y = Vector.write values (fromIntegral $ y * width + x)
 
-writeCells :: Cells -> Int32 -> Int32 -> [(Int32, Int32)] -> Int32 -> IO ()
-writeCells cells offsetX offsetY points value =
-  forM_ points $ \(x, y) -> writeCell cells (x + offsetX) (y + offsetY) value
+writeCells :: Cells -> Int32 -> Int32 -> Rotation -> Pattern -> Int32 -> IO ()
+writeCells cells offsetX offsetY (rx, ry) (Pattern ox oy points) value =
+  forM_ points $ \(x, y) -> writeCell cells (rx * (x - ox) + offsetX) (ry * (y - oy) + offsetY) value
 
-pattern :: [(Int32, Int32)]
-pattern = [(1, 0), (2, 0), (2, 1), (0, 2), (1, 2), (2, 2)]
+type Rotation = (Int32, Int32)
+
+rotations :: [Rotation]
+rotations = [(1, 1), (1, -1), (-1, -1), (-1, 1)]
+
+crosshairsPattern :: Pattern
+crosshairsPattern = 
+    Pattern 0 0 [
+      (-20, 0), (-21, 0), (-22, 0), (-23, 0),
+      (0, -20), (0, -21), (0, -22), (0, -23),
+      (20, 0), (21, 0), (22, 0), (23, 0),
+      (0, 20), (0, 21), (0, 22), (0, 23)
+    ]
+
+data Pattern = Pattern
+  { _originX :: Int32,
+    _originY :: Int32,
+    _points  :: [(Int32, Int32)]
+  }
+
+patterns :: [Pattern]
+patterns = [glider, gliderMistake, gliderGun]
+  where
+    glider = Pattern 0 0 [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)]
+    gliderMistake = Pattern 0 0 [(1, 0), (2, 0), (2, 1), (0, 2), (1, 2), (2, 2)]
+    gliderGun =
+      Pattern 18 5 [
+        (0,  5), (0,  6),
+        (1,  5), (1,  6),
+        (10, 5), (10, 6), (10, 7),
+        (11, 4), (11, 8),
+        (12, 3), (12, 9),
+        (13, 3), (13, 9),
+        (14, 6),
+        (15, 4), (15, 8),
+        (16, 5), (16, 6), (16, 7),
+        (17, 6),
+        (20, 3), (20, 4), (20, 5),
+        (21, 3), (21, 4), (21, 5),
+        (22, 2), (22, 6),
+        (24, 1), (24, 2), (24, 6), (24, 7),
+        (34, 3), (34, 4),
+        (35, 3), (35, 4)
+      ]
 
 gameInit :: Int32 -> Int32 -> IO GameState
 gameInit windowWidth windowHeight = do
@@ -121,38 +162,61 @@ gameInit windowWidth windowHeight = do
       width = windowWidth `div` fromIntegral cellSize
       height = windowHeight `div` fromIntegral cellSize
       numCells = fromIntegral (width * height)
+      selectedPatternNumber = 0
+      selectedRotationNumber = 0
   gen0Values <- Vector.new numCells
   gen1Values <- Vector.new numCells
   let gen0 = Cells width height gen0Values
   let gen1 = Cells width height gen1Values
-
   return GameState {..}
 
 gameUpdate :: SDL.Renderer -> [SDL.Event] -> GameState -> IO GameState
-gameUpdate renderer events state@GameState {..} = do
+gameUpdate renderer events state = do
+  state'@GameState {..} <- foldM (flip processInput) state events
+
   P (V2 mouseX mouseY) <- SDL.getAbsoluteMouseLocation
   isPressed <- SDL.getMouseButtons
   let mouseCellX = fromIntegral (mouseX `div` cellSize)
       mouseCellY = fromIntegral (mouseY `div` cellSize)
-      mouseIsPressed = isPressed SDL.ButtonRight
+      mouseIsPressed = isPressed SDL.ButtonRight -- held down for dragging
       mouseWasPressed = any isMouseDownEvent events
-      pause' = pause /= any isPauseEvent events
+      selectedPattern = patterns !! selectedPatternNumber
+      selectedRotation = rotations !! selectedRotationNumber
 
-  let state' = state {
-        frame = frame + 1,
-        pause = pause',
-        gen0 = if pause then gen0 else gen1,
-        gen1 = if pause then gen1 else gen0
-      }
+  when (mouseIsPressed || mouseWasPressed) $
+    writeCells gen1 mouseCellX mouseCellY selectedRotation selectedPattern frame
 
-  when (mouseIsPressed || mouseWasPressed) $ writeCells gen1 mouseCellX mouseCellY pattern frame
-
-  unless pause $ stepGeneration frame gen1 gen0
+  unless pause $
+    stepGeneration frame gen1 gen0
 
   drawGeneration renderer frame gen1
-  drawCell renderer mouseCellX mouseCellY (V4 0xf7 0xca 0x88 0xff)
+  drawPattern renderer mouseCellX mouseCellY selectedRotation selectedPattern (V4 0xf7 0xca 0x88 0xff)
+  drawPattern renderer mouseCellX mouseCellY selectedRotation crosshairsPattern (V4 0x38 0x38 0x38 0xff)
 
-  return state'
+  return state' {
+      frame = frame + 1,
+      gen0 = if pause then gen0 else gen1,
+      gen1 = if pause then gen1 else gen0
+    }
+
+processInput :: SDL.Event -> GameState -> IO GameState
+processInput event
+  | SDL.KeyboardEvent keyboardEvent <- SDL.eventPayload event,
+    SDL.Pressed <- SDL.keyboardEventKeyMotion keyboardEvent,
+    keysym <- SDL.keyboardEventKeysym keyboardEvent,
+    scancode <- SDL.keysymScancode keysym
+    = keymap scancode
+processInput _ = return
+
+keymap :: SDL.Scancode -> GameState -> IO GameState
+keymap scancode state@GameState {..} =
+  case scancode of
+    SDL.Scancode1 -> return state { selectedPatternNumber = 0 }
+    SDL.Scancode2 -> return state { selectedPatternNumber = 1 }
+    SDL.Scancode3 -> return state { selectedPatternNumber = 2 }
+    SDL.ScancodeP -> return state { pause = not pause }
+    SDL.ScancodeR -> return state { selectedRotationNumber = succ selectedRotationNumber `mod` 4 }
+    _ -> return state
 
 stepGeneration :: Int32 -> Cells -> Cells -> IO ()
 stepGeneration frame gen0 gen1@Cells { width, height } =
@@ -188,6 +252,11 @@ drawCell renderer x y color = do
   let rect = Rectangle (P $ V2 (fromIntegral x * cellSize) (fromIntegral y * cellSize)) (V2 cellSize cellSize)
   SDL.rendererDrawColor renderer $= color
   SDL.fillRect renderer (Just rect)
+
+drawPattern :: SDL.Renderer -> Int32 -> Int32 -> Rotation -> Pattern -> V4 Word8 -> IO ()
+drawPattern renderer offsetX offsetY (rx, ry) (Pattern ox oy points) color =
+  forM_ points $ \(x, y) -> -- TODO: call fillRects with batches of cells
+    drawCell renderer (rx * (x - ox) + offsetX) (ry * (y - oy) + offsetY) color
 
 drawGeneration :: SDL.Renderer -> Int32 -> Cells -> IO ()
 drawGeneration renderer frame cells@Cells { width, height } = do
