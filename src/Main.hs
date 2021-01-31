@@ -4,11 +4,13 @@ import           Control.Concurrent (threadDelay)
 import           Control.Monad (foldM, forM_, unless, when)
 import           Data.Bits ((.|.), shiftL)
 import           Data.Int (Int32)
-import           Data.Vector.Unboxed.Mutable (IOVector)
-import qualified Data.Vector.Unboxed.Mutable as Vector
+import           Control.Monad.Primitive (PrimState)
+import           Data.Primitive.PrimArray (MutablePrimArray)
+import qualified Data.Primitive.PrimArray as Array
 import           Data.Word (Word8, Word32)
 import           Foreign.Ptr (Ptr, castPtr, plusPtr)
 import           Foreign.Storable (poke, sizeOf)
+import           Text.Printf (printf)
 
 import           SDL (Event, Point (P), V2 (V2), ($=))
 import qualified SDL
@@ -52,29 +54,37 @@ mainLoop renderer texture (windowWidth, windowHeight) = do
       gameState' <- gameUpdate frame (Buffer pixels pitch windowWidth windowHeight) events gameState
       SDL.unlockTexture texture
       SDL.copy renderer texture Nothing Nothing
+      timeEndWork <- SDL.time
 
-      timeBeginSleep <- SDL.time
       let targetTime = timeLastFrame + targetTimePerFrame
-          timeToSleep = targetTime - timeBeginSleep
       sleepUntil targetTime
+      timeEndSleep <- SDL.time
 
       SDL.present renderer
-      timeEndFrame <- SDL.time
+      let timeEndFrame = timeEndSleep
 
-      when (frame `mod` 60 == 0) $
-        print (1000.0 * (timeEndFrame - timeLastFrame), 1000.0 * timeToSleep)
+      when (frame `mod` 60 == 0) $ do
+        let durationWork = timeEndWork - timeLastFrame
+            durationSleep = timeEndSleep - timeEndWork
+            durationFrame = timeEndFrame - timeLastFrame
+        printf "wk=%.1f sl=%.1f fr=%.3f fps=%.1f\n"
+          (durationWork * 1000.0)
+          (durationSleep * 1000.0)
+          (durationFrame * 1000.0)
+          (1.0 / durationFrame)
 
       let quit = any isQuitEvent events
       unless quit $ continue (frame + 1) timeEndFrame gameState'
 
--- Put the thread to sleep until less than 0.5 milliseconds remain before the
+-- Put the thread to sleep until less than one millisecond remains before the
 -- target time, then spin the remaining time.
 sleepUntil :: Double -> IO ()
 sleepUntil targetTime = do
-  t <- SDL.time
-  let timeRemain = targetTime - t
-      timeRemainUs = floor (timeRemain * 1000000.0) :: Int
-  when (timeRemainUs > 500) $ threadDelay timeRemainUs
+  now <- SDL.time
+  let thresholdDuration = 0.001 -- one millisecond
+  when (now + thresholdDuration < targetTime) $ do
+    let sleepTime = targetTime - now - thresholdDuration
+    threadDelay (floor $ sleepTime * 1000.0 * 1000.0)
   spinUntil targetTime
 
 -- Spin until the target time is reached.
@@ -82,8 +92,8 @@ spinUntil :: Double -> IO ()
 spinUntil targetTime = go
   where
     go = do
-      t <- SDL.time
-      unless (t >= targetTime) go
+      now <- SDL.time
+      unless (now >= targetTime) go
 
 isKeyDownEvent :: (SDL.Scancode -> Bool) -> SDL.Event -> Bool
 isKeyDownEvent predicate event =
@@ -120,20 +130,24 @@ data GameState = GameState {
 data Cells = Cells {
   width  :: Int,
   height :: Int,
-  values :: IOVector Int32
+  values :: MutablePrimArray (PrimState IO) Int32
 }
 
 readCell :: Cells -> Int -> Int -> IO Int32
-readCell Cells { width, values } x y = Vector.read values (y * width + x)
+readCell Cells { width, values } x y =
+  Array.readPrimArray values (y * width + x)
 
 writeCell :: Cells -> Int -> Int -> Int32 -> IO ()
-writeCell Cells { width, height, values } x y
-  | x < 0 || x >= width || y < 0 || y >= height = const (return ())
-  | otherwise = Vector.write values (y * width + x)
+writeCell Cells { width, values } x y =
+  Array.writePrimArray values (y * width + x)
 
 writeCells :: Cells -> Int -> Int -> Rotation -> Pattern -> Int32 -> IO ()
-writeCells cells offsetX offsetY (rx, ry) (Pattern ox oy points) value =
-  forM_ points $ \(x, y) -> writeCell cells (rx * (x - ox) + offsetX) (ry * (y - oy) + offsetY) value
+writeCells cells@Cells { width, height } offsetX offsetY (rx, ry) (Pattern ox oy points) value =
+  forM_ points $ \(x, y) -> do
+    let pointX = rx * (x - ox) + offsetX
+        pointY = ry * (y - oy) + offsetY
+    when (pointX >= 0 && pointY >= 0 && pointX < width && pointY < height ) $
+      writeCell cells pointX pointY value
 
 type Rotation = (Int, Int)
 
@@ -189,8 +203,8 @@ gameInit windowWidth windowHeight = do
       numCells = fromIntegral (width * height)
       selectedPatternNumber = 0
       selectedRotationNumber = 0
-  gen0Values <- Vector.new numCells
-  gen1Values <- Vector.new numCells
+  gen0Values <- Array.newPrimArray numCells
+  gen1Values <- Array.newPrimArray numCells
   let gen0 = Cells width height gen0Values
   let gen1 = Cells width height gen1Values
   return GameState {..}
@@ -254,9 +268,9 @@ clearGeneration gen@Cells { width, height } =
 
 stepGeneration :: Int32 -> Cells -> Cells -> IO ()
 stepGeneration frame gen0 gen1@Cells { width, height } =
-  forM_ [0 .. height - 1] $ \y ->
-    forM_ [0 .. width - 1] $ \x -> do
-      neighbours <- foldM checkNeighbour 0 (neighbouringCells x y)
+  forM_ [1 .. height - 2] $ \y ->
+    forM_ [1 .. width - 2] $ \x -> do
+      neighbours <- countNeighbours gen0 x y
       value <- readCell gen0 x y
       let newValue =
             if | value > 0, neighbours == 2 || neighbours == 3 -> value
@@ -264,19 +278,21 @@ stepGeneration frame gen0 gen1@Cells { width, height } =
                | value == 0, neighbours == 3 -> frame
                | otherwise -> 0
       writeCell gen1 x y newValue
+
+countNeighbours :: Cells -> Int -> Int -> IO Int32
+countNeighbours gen@Cells { .. } x y = do
+    a <- readCell gen (x - 1) (y - 1)
+    b <- readCell gen  x      (y - 1)
+    c <- readCell gen (x + 1) (y - 1)
+    d <- readCell gen (x - 1)  y
+    e <- readCell gen (x + 1)  y
+    f <- readCell gen (x - 1) (y + 1)
+    g <- readCell gen  x      (y + 1)
+    h <- readCell gen (x + 1) (y + 1)
+    let count = n a + n b + n c + n d + n e + n f + n g + n h
+    return count
   where
-    checkNeighbour :: Int32 -> (Int, Int) -> IO Int32
-    checkNeighbour !n (x, y)
-      | x < 0 || x >= width || y < 0 || y >= height = return n
-      | otherwise = do
-          value <- readCell gen0 x y
-          return $ n + if value > 0 then 1 else 0
-    neighbouringCells x y =
-      [
-        (x-1,y-1),(x,y-1),(x+1,y-1),
-        (x-1,y),(x+1,y),
-        (x-1,y+1),(x,y+1),(x+1,y+1)
-      ]
+    n value = if value > 0 then 1 else 0
 
 data Buffer = Buffer { pixels :: Ptr Word8, pitch :: Int, width :: Int, height :: Int }
 

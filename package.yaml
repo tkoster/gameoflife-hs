@@ -29,5 +29,5 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N1
     dependencies:
+    - primitive
     - sdl2
-    - vector
