@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: b4651f2569ce08241f0f99c45ca0afdfa0ad289ad1a5cd782bb859167cd7416f
+-- hash: 27f7fab55c20256c11c8dc0d2c9653a8eda4e7e19348041c4b26042f08e5eaba
 
 name:           gameoflife
 version:        0.1.0.0
@@ -22,7 +22,7 @@ executable gameoflife
       Paths_gameoflife
   hs-source-dirs:
       src
-  default-extensions: BangPatterns DuplicateRecordFields MultiWayIf NamedFieldPuns OverloadedStrings RecordWildCards
+  default-extensions: BangPatterns DuplicateRecordFields MultiWayIf NamedFieldPuns OverloadedStrings RecordWildCards ViewPatterns
   ghc-options: -Wall -O2 -threaded -rtsopts -with-rtsopts=-N1
   build-depends:
       base >=4.7 && <5

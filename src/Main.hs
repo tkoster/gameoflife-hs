@@ -2,47 +2,70 @@ module Main (main) where
 
 import           Control.Concurrent (threadDelay)
 import           Control.Monad (foldM, forM_, unless, when)
+import           Data.Bits ((.|.), shiftL)
 import           Data.Int (Int32)
 import           Data.Vector.Unboxed.Mutable (IOVector)
 import qualified Data.Vector.Unboxed.Mutable as Vector
-import           Data.Word (Word8)
-import           Foreign.C.Types (CInt)
+import           Data.Word (Word8, Word32)
+import           Foreign.Ptr (Ptr, castPtr, plusPtr)
+import           Foreign.Storable (poke, sizeOf)
 
-import           SDL (Event, Point (P), Rectangle (Rectangle), V2 (V2), V4 (V4), ($=))
+import           SDL (Event, Point (P), V2 (V2), ($=))
 import qualified SDL
 
 main :: IO ()
 main = do
   SDL.initializeAll
 
-  let windowSettings = SDL.defaultWindow { SDL.windowInitialSize = V2 1280 720 }
+  let windowSettings =
+        SDL.defaultWindow {
+          SDL.windowInitialSize = V2 1280 720,
+          SDL.windowGraphicsContext = SDL.OpenGLContext SDL.defaultOpenGL
+        }
+      rendererSettings =
+        SDL.defaultRenderer {
+          SDL.rendererType = SDL.AcceleratedRenderer
+        }
   window <- SDL.createWindow "Game Of Life" windowSettings
-  renderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
+  renderer <- SDL.createRenderer window (-1) rendererSettings
+  rendererInfo <- SDL.getRendererInfo renderer
+  putStrLn $ "Renderer: " ++ show (SDL.rendererInfoName rendererInfo)
+  windowSize@(V2 windowWidth windowHeight) <- SDL.get (SDL.windowSize window)
+  texture <- SDL.createTexture renderer SDL.RGB888 SDL.TextureAccessStreaming windowSize
+
   SDL.cursorVisible $= False
 
-  mainLoop window renderer
+  mainLoop renderer texture (fromIntegral windowWidth, fromIntegral windowHeight)
 
-mainLoop :: SDL.Window -> SDL.Renderer -> IO ()
-mainLoop window renderer = do
-  V2 w h <- SDL.get (SDL.windowSize window)
-  gameState <- gameInit (fromIntegral w) (fromIntegral h)
+mainLoop :: SDL.Renderer -> SDL.Texture -> (Int, Int) -> IO ()
+mainLoop renderer texture (windowWidth, windowHeight) = do
+  gameState <- gameInit windowWidth windowHeight
 
   timeFirstFrame <- SDL.time
-  continue timeFirstFrame gameState
+  continue 1 timeFirstFrame gameState
   where
     targetTimePerFrame = 1.0 / 60.0
-    continue timeLastFrame gameState = do
+    continue !frame timeLastFrame gameState = do
       events <- SDL.pollEvents
-      gameState' <- gameUpdate renderer events gameState
 
+      (castPtr -> pixels, fromIntegral -> pitch) <- SDL.lockTexture texture Nothing
+      gameState' <- gameUpdate frame (Buffer pixels pitch windowWidth windowHeight) events gameState
+      SDL.unlockTexture texture
+      SDL.copy renderer texture Nothing Nothing
+
+      timeBeginSleep <- SDL.time
       let targetTime = timeLastFrame + targetTimePerFrame
+          timeToSleep = targetTime - timeBeginSleep
       sleepUntil targetTime
 
       SDL.present renderer
       timeEndFrame <- SDL.time
 
+      when (frame `mod` 60 == 0) $
+        print (1000.0 * (timeEndFrame - timeLastFrame), 1000.0 * timeToSleep)
+
       let quit = any isQuitEvent events
-      unless quit $ continue timeEndFrame gameState'
+      unless quit $ continue (frame + 1) timeEndFrame gameState'
 
 -- Put the thread to sleep until less than 0.5 milliseconds remain before the
 -- target time, then spin the remaining time.
@@ -84,11 +107,10 @@ isMouseDownEvent event
 isMouseDownEvent _ = False
 
 data GameState = GameState {
-  frame   :: Int32,
   pause   :: Bool,
   step    :: Bool,
-  width   :: Int32,
-  height  :: Int32,
+  width   :: Int,
+  height  :: Int,
   gen0    :: Cells,
   gen1    :: Cells,
   selectedPatternNumber :: Int,
@@ -96,22 +118,24 @@ data GameState = GameState {
 }
 
 data Cells = Cells {
-  width  :: Int32,
-  height :: Int32,
+  width  :: Int,
+  height :: Int,
   values :: IOVector Int32
 }
 
-readCell :: Cells -> Int32 -> Int32 -> IO Int32
-readCell Cells { width, values } x y = Vector.read values (fromIntegral $ y * width + x)
+readCell :: Cells -> Int -> Int -> IO Int32
+readCell Cells { width, values } x y = Vector.read values (y * width + x)
 
-writeCell :: Cells -> Int32 -> Int32 -> Int32 -> IO ()
-writeCell Cells { width, values } x y = Vector.write values (fromIntegral $ y * width + x)
+writeCell :: Cells -> Int -> Int -> Int32 -> IO ()
+writeCell Cells { width, height, values } x y
+  | x < 0 || x >= width || y < 0 || y >= height = const (return ())
+  | otherwise = Vector.write values (y * width + x)
 
-writeCells :: Cells -> Int32 -> Int32 -> Rotation -> Pattern -> Int32 -> IO ()
+writeCells :: Cells -> Int -> Int -> Rotation -> Pattern -> Int32 -> IO ()
 writeCells cells offsetX offsetY (rx, ry) (Pattern ox oy points) value =
   forM_ points $ \(x, y) -> writeCell cells (rx * (x - ox) + offsetX) (ry * (y - oy) + offsetY) value
 
-type Rotation = (Int32, Int32)
+type Rotation = (Int, Int)
 
 rotations :: [Rotation]
 rotations = [(1, 1), (1, -1), (-1, -1), (-1, 1)]
@@ -126,9 +150,9 @@ crosshairsPattern =
     ]
 
 data Pattern = Pattern
-  { _originX :: Int32,
-    _originY :: Int32,
-    _points  :: [(Int32, Int32)]
+  { _originX :: Int,
+    _originY :: Int,
+    _points  :: [(Int, Int)]
   }
 
 patterns :: [Pattern]
@@ -156,13 +180,12 @@ patterns = [glider, gliderMistake, gliderGun]
         (35, 3), (35, 4)
       ]
 
-gameInit :: Int32 -> Int32 -> IO GameState
+gameInit :: Int -> Int -> IO GameState
 gameInit windowWidth windowHeight = do
-  let frame = 1
-      pause = False
+  let pause = False
       step = False
-      width = windowWidth `div` fromIntegral cellSize
-      height = windowHeight `div` fromIntegral cellSize
+      width = windowWidth `div` cellSize
+      height = windowHeight `div` cellSize
       numCells = fromIntegral (width * height)
       selectedPatternNumber = 0
       selectedRotationNumber = 0
@@ -172,14 +195,14 @@ gameInit windowWidth windowHeight = do
   let gen1 = Cells width height gen1Values
   return GameState {..}
 
-gameUpdate :: SDL.Renderer -> [SDL.Event] -> GameState -> IO GameState
-gameUpdate renderer events state = do
+gameUpdate :: Int32 -> Buffer -> [SDL.Event] -> GameState -> IO GameState
+gameUpdate frame buffer events state = do
   state'@GameState {..} <- foldM (flip processInput) state events
 
   P (V2 mouseX mouseY) <- SDL.getAbsoluteMouseLocation
   isPressed <- SDL.getMouseButtons
-  let mouseCellX = fromIntegral (mouseX `div` cellSize)
-      mouseCellY = fromIntegral (mouseY `div` cellSize)
+  let mouseCellX = fromIntegral mouseX `div` cellSize
+      mouseCellY = fromIntegral mouseY `div` cellSize
       mouseIsPressed = isPressed SDL.ButtonRight -- held down for dragging
       mouseWasPressed = any isMouseDownEvent events
       selectedPattern = patterns !! selectedPatternNumber
@@ -192,12 +215,11 @@ gameUpdate renderer events state = do
   when advance $
     stepGeneration frame gen1 gen0
 
-  drawGeneration renderer frame gen1
-  drawPattern renderer mouseCellX mouseCellY selectedRotation selectedPattern (V4 0xf7 0xca 0x88 0xff)
-  drawPattern renderer mouseCellX mouseCellY selectedRotation crosshairsPattern (V4 0x38 0x38 0x38 0xff)
+  drawGeneration buffer frame gen1
+  drawPattern buffer mouseCellX mouseCellY selectedRotation selectedPattern 0xf7ca88
+  drawPattern buffer mouseCellX mouseCellY selectedRotation crosshairsPattern 0x383838
 
   return state' {
-      frame = frame + 1,
       step = False,
       gen0 = if advance then gen1 else gen0,
       gen1 = if advance then gen0 else gen1
@@ -243,7 +265,7 @@ stepGeneration frame gen0 gen1@Cells { width, height } =
                | otherwise -> 0
       writeCell gen1 x y newValue
   where
-    checkNeighbour :: Int32 -> (Int32, Int32) -> IO Int32
+    checkNeighbour :: Int32 -> (Int, Int) -> IO Int32
     checkNeighbour !n (x, y)
       | x < 0 || x >= width || y < 0 || y >= height = return n
       | otherwise = do
@@ -256,32 +278,45 @@ stepGeneration frame gen0 gen1@Cells { width, height } =
         (x-1,y+1),(x,y+1),(x+1,y+1)
       ]
 
-cellSize :: CInt
+data Buffer = Buffer { pixels :: Ptr Word8, pitch :: Int, width :: Int, height :: Int }
+
+backgroundColor :: Word32
+backgroundColor = 0x181818
+
+cellSize :: Int
 cellSize = 2 -- 2x2 pixles
 
-drawCell :: SDL.Renderer -> Int32 -> Int32 -> V4 Word8 -> IO ()
-drawCell renderer x y color = do
-  let rect = Rectangle (P $ V2 (fromIntegral x * cellSize) (fromIntegral y * cellSize)) (V2 cellSize cellSize)
-  SDL.rendererDrawColor renderer $= color
-  SDL.fillRect renderer (Just rect)
+drawCell :: Buffer -> Int -> Int -> Word32 -> IO ()
+drawCell Buffer {..} cellX cellY color = do
+  drawPoint (cellX * cellSize) (cellY * cellSize)
+  drawPoint (cellX * cellSize + 1) (cellY * cellSize)
+  drawPoint (cellX * cellSize + 1) (cellY * cellSize + 1)
+  drawPoint (cellX * cellSize) (cellY * cellSize + 1)
+  where
+    drawPoint x y
+      | x < 0 || x >= width || y < 0 || y >= height = return ()
+      | otherwise =
+          let rowPtr  = pixels `plusPtr` (y * pitch)
+              cellPtr = castPtr rowPtr `plusPtr` (x * sizeOf color)
+          in  poke cellPtr color -- UNSAFE: Ensure cellPtr, x, y are within bounds.
 
-drawPattern :: SDL.Renderer -> Int32 -> Int32 -> Rotation -> Pattern -> V4 Word8 -> IO ()
-drawPattern renderer offsetX offsetY (rx, ry) (Pattern ox oy points) color =
-  forM_ points $ \(x, y) -> -- TODO: call fillRects with batches of cells
-    drawCell renderer (rx * (x - ox) + offsetX) (ry * (y - oy) + offsetY) color
+drawPattern :: Buffer -> Int -> Int -> Rotation -> Pattern -> Word32 -> IO ()
+drawPattern buffer offsetX offsetY (rx, ry) (Pattern ox oy points) color =
+  forM_ points $ \(x, y) ->
+    drawCell buffer (rx * (x - ox) + offsetX) (ry * (y - oy) + offsetY) color
 
-drawGeneration :: SDL.Renderer -> Int32 -> Cells -> IO ()
-drawGeneration renderer frame cells@Cells { width, height } = do
-  SDL.rendererDrawColor renderer $= V4 0x18 0x18 0x18 0xff
-  SDL.clear renderer
-  SDL.rendererDrawBlendMode renderer $= SDL.BlendAlphaBlend
+drawGeneration :: Buffer -> Int32 -> Cells -> IO ()
+drawGeneration buffer frame cells@Cells { width, height } = do
+  -- TODO: Draw in scan lines for cache efficiency
   forM_ [0 .. height - 1] $ \y ->
     forM_ [0 .. width - 1] $ \x -> do
       value <- readCell cells x y
-      when (value > 0) $ do
-        let age = frame - value
-            alpha = 0xff - fromIntegral (min 0xe0 age)
-            color = V4 0xff 0xff 0xff alpha
-        drawCell renderer x y color -- TODO: call fillRects with batches of cells
-  SDL.rendererDrawBlendMode renderer $= SDL.BlendNone
+      let age = frame - value
+          shade = 0xff - fromIntegral (min 0xd0 age)
+          color = if value > 0 then rgb shade shade shade else backgroundColor
+      drawCell buffer x y color
+
+rgb :: Word8 -> Word8 -> Word8 -> Word32
+rgb (fromIntegral -> r) (fromIntegral -> g) (fromIntegral -> b) =
+  shiftL r 16 .|. shiftL g 8 .|. b
 
