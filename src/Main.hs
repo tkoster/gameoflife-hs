@@ -270,9 +270,9 @@ stepGeneration :: Int32 -> Cells -> Cells -> IO ()
 stepGeneration frame gen0 gen1@Cells { width, height } =
   forM_ [1 .. height - 2] $ \y ->
     forM_ [1 .. width - 2] $ \x -> do
-      neighbours <- countNeighbours gen0 x y
-      value <- readCell gen0 x y
-      let newValue =
+      !neighbours <- countNeighbours gen0 x y
+      !value <- readCell gen0 x y
+      let !newValue =
             if | value > 0, neighbours == 2 || neighbours == 3 -> value
                | value > 0, otherwise -> 0
                | value == 0, neighbours == 3 -> frame
@@ -281,15 +281,15 @@ stepGeneration frame gen0 gen1@Cells { width, height } =
 
 countNeighbours :: Cells -> Int -> Int -> IO Int32
 countNeighbours gen@Cells { .. } x y = do
-    a <- readCell gen (x - 1) (y - 1)
-    b <- readCell gen  x      (y - 1)
-    c <- readCell gen (x + 1) (y - 1)
-    d <- readCell gen (x - 1)  y
-    e <- readCell gen (x + 1)  y
-    f <- readCell gen (x - 1) (y + 1)
-    g <- readCell gen  x      (y + 1)
-    h <- readCell gen (x + 1) (y + 1)
-    let count = n a + n b + n c + n d + n e + n f + n g + n h
+    !a <- readCell gen (x - 1) (y - 1)
+    !b <- readCell gen  x      (y - 1)
+    !c <- readCell gen (x + 1) (y - 1)
+    !d <- readCell gen (x - 1)  y
+    !e <- readCell gen (x + 1)  y
+    !f <- readCell gen (x - 1) (y + 1)
+    !g <- readCell gen  x      (y + 1)
+    !h <- readCell gen (x + 1) (y + 1)
+    let !count = n a + n b + n c + n d + n e + n f + n g + n h
     return count
   where
     n value = if value > 0 then 1 else 0
