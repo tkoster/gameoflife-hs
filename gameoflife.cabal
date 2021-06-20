@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 1ad728d6cea9ef8e57de5caeb5e012d3794ca7ed73480450ffa3a1dcfd1e17c9
+-- hash: 27f7fab55c20256c11c8dc0d2c9653a8eda4e7e19348041c4b26042f08e5eaba
 
 name:           gameoflife
 version:        0.1.0.0
@@ -26,6 +26,6 @@ executable gameoflife
   ghc-options: -Wall -O2 -threaded -rtsopts -with-rtsopts=-N1
   build-depends:
       base >=4.7 && <5
-    , primitive
     , sdl2
+    , vector
   default-language: Haskell2010

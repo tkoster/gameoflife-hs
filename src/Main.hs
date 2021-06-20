@@ -4,9 +4,8 @@ import           Control.Concurrent (threadDelay)
 import           Control.Monad (foldM, forM_, unless, when)
 import           Data.Bits ((.|.), shiftL)
 import           Data.Int (Int32)
-import           Control.Monad.Primitive (PrimState)
-import           Data.Primitive.PrimArray (MutablePrimArray)
-import qualified Data.Primitive.PrimArray as Array
+import           Data.Vector.Unboxed.Mutable (IOVector)
+import qualified Data.Vector.Unboxed.Mutable as Vector
 import           Data.Word (Word8, Word32)
 import           Foreign.Ptr (Ptr, castPtr, plusPtr)
 import           Foreign.Storable (poke, sizeOf)
@@ -130,16 +129,16 @@ data GameState = GameState {
 data Cells = Cells {
   width  :: Int,
   height :: Int,
-  values :: MutablePrimArray (PrimState IO) Int32
+  values :: IOVector Int32
 }
 
 readCell :: Cells -> Int -> Int -> IO Int32
 readCell Cells { width, values } x y =
-  Array.readPrimArray values (y * width + x)
+  Vector.read values (y * width + x)
 
 writeCell :: Cells -> Int -> Int -> Int32 -> IO ()
 writeCell Cells { width, values } x y =
-  Array.writePrimArray values (y * width + x)
+  Vector.write values (y * width + x)
 
 writeCells :: Cells -> Int -> Int -> Rotation -> Pattern -> Int32 -> IO ()
 writeCells cells@Cells { width, height } offsetX offsetY (rx, ry) (Pattern ox oy points) value =
@@ -203,8 +202,8 @@ gameInit windowWidth windowHeight = do
       numCells = fromIntegral (width * height)
       selectedPatternNumber = 0
       selectedRotationNumber = 0
-  gen0Values <- Array.newPrimArray numCells
-  gen1Values <- Array.newPrimArray numCells
+  gen0Values <- Vector.new numCells
+  gen1Values <- Vector.new numCells
   let gen0 = Cells width height gen0Values
   let gen1 = Cells width height gen1Values
   return GameState {..}
